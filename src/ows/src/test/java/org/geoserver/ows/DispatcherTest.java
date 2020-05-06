@@ -85,6 +85,7 @@ public class DispatcherTest {
         Assert.assertEquals("hello", map.get("service"));
 
         request = new MockHttpServletRequest();
+        request.setServerPort(8080);
         request.setContextPath("/geoserver");
         request.setRequestURI("/geoserver/foobar/hello");
         request.setMethod("get");
@@ -103,6 +104,7 @@ public class DispatcherTest {
     @Test
     public void testReadOpPost() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setServerPort(8080);
         request.setContextPath("/geoserver");
         request.setRequestURI("/geoserver/hello");
         request.setMethod("post");

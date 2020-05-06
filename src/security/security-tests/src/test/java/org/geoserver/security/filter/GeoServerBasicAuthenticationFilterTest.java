@@ -16,7 +16,6 @@ import org.apache.commons.codec.binary.Base64;
 import org.geoserver.config.GeoServerDataDirectory;
 import org.geoserver.security.GeoServerSecurityManager;
 import org.geoserver.security.config.BasicAuthenticationFilterConfig;
-import org.geoserver.test.GeoServerAbstractTestSupport;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -78,8 +77,7 @@ public class GeoServerBasicAuthenticationFilterTest {
 
     @SuppressWarnings("PMD.AvoidUsingHardCodedIP")
     private MockHttpServletRequest createRequest() {
-        MockHttpServletRequest request =
-                new GeoServerAbstractTestSupport.GeoServerMockHttpServletRequest();
+        MockHttpServletRequest request = new MockHttpServletRequest();
         request.setScheme("http");
         request.setServerName("localhost");
         request.setContextPath("/geoserver");
