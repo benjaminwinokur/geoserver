@@ -56,6 +56,13 @@ public class WPSInfoImpl extends ServiceInfoImpl implements WPSInfo {
     String storageDirectory;
 
     /**
+     * The directory where processes are allowed to store outputs outside of the WPS resource
+     * storage so that the files will not be automatically removed based on the resource expiration
+     * timeout.
+     */
+    String externalOutputDirectory;
+
+    /**
      * How to handle requests for processes that have been secured, and should not be reached
      * without the proper authentication
      */
@@ -89,6 +96,9 @@ public class WPSInfoImpl extends ServiceInfoImpl implements WPSInfo {
      * before it gets killed by the WPS container
      */
     Integer maxAsynchronousTotalTime;
+
+    /** The flag indicating whether remote inputs are enabled. */
+    boolean remoteInputDisabled;
 
     public WPSInfoImpl() {
         title = "Prototype GeoServer WPS";
@@ -216,6 +226,16 @@ public class WPSInfoImpl extends ServiceInfoImpl implements WPSInfo {
     }
 
     @Override
+    public String getExternalOutputDirectory() {
+        return externalOutputDirectory;
+    }
+
+    @Override
+    public void setExternalOutputDirectory(String externalOutputDirectory) {
+        this.externalOutputDirectory = externalOutputDirectory;
+    }
+
+    @Override
     public CatalogMode getCatalogMode() {
         if (catalogMode == null) {
             catalogMode = CatalogMode.HIDE;
@@ -296,6 +316,16 @@ public class WPSInfoImpl extends ServiceInfoImpl implements WPSInfo {
     @Override
     public void setMaxAsynchronousTotalTime(Integer maxAsynchronousTotalTime) {
         this.maxAsynchronousTotalTime = maxAsynchronousTotalTime;
+    }
+
+    @Override
+    public boolean isRemoteInputDisabled() {
+        return remoteInputDisabled;
+    }
+
+    @Override
+    public void setRemoteInputDisabled(boolean remoteInputDisabled) {
+        this.remoteInputDisabled = remoteInputDisabled;
     }
 
     @Override

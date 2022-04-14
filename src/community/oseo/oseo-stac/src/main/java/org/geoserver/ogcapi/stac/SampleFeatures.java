@@ -42,7 +42,7 @@ public class SampleFeatures implements GeoServerLifecycleHandler {
                                     Filter filter = Filter.INCLUDE;
                                     if (o instanceof String) {
                                         filter =
-                                                STACService.getCollectionsFilter(
+                                                STACService.getProductInCollectionFilter(
                                                         Arrays.asList((String) o));
                                     }
                                     Query q = new Query();

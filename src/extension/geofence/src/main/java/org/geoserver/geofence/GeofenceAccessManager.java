@@ -575,12 +575,15 @@ public class GeofenceAccessManager
 
                 String role = "UNKNOWN";
                 for (GrantedAuthority authority : user.getAuthorities()) {
-                    if (config.getRoles().contains(authority.getAuthority())) {
+                    if (config.getRoles().contains(authority.getAuthority())
+                            || config.getRoles().contains("*")) {
                         role = authority.getAuthority();
+                        break;
                     }
                 }
                 LOGGER.log(Level.FINE, "Setting role for filter: {0}", new Object[] {role});
                 ruleFilter.setRole(role);
+                ruleFilter.setUser(RuleFilter.SpecialFilterType.DEFAULT);
             } else {
                 String username = user.getName();
                 if (username == null || username.isEmpty()) {

@@ -374,8 +374,9 @@ public class StyleController extends AbstractCatalogController {
         PutIgnoringExtensionContentNegotiationStrategy stylePutContentNegotiationStrategy() {
             return new PutIgnoringExtensionContentNegotiationStrategy(
                     new PatternsRequestCondition(
-                            "/styles/{styleName}",
-                            "/workspaces/{workspaceName}/styles/{styleName}"),
+                            RestBaseController.ROOT_PATH + "/styles/{styleName}",
+                            RestBaseController.ROOT_PATH
+                                    + "/workspaces/{workspaceName}/styles/{styleName}"),
                     Arrays.asList(
                             MediaType.APPLICATION_JSON,
                             MediaType.APPLICATION_XML,
@@ -509,6 +510,7 @@ public class StyleController extends AbstractCatalogController {
                 && sld.getStyledLayers().length <= 1
                 && SLDHandler.VERSION_10.equals(version)) {
             info.setFormat(handler.getFormat());
+            info.setFormatVersion(version);
             resourcePool.writeStyle(info, style, true);
         } else {
             info.setFormat(handler.getFormat());

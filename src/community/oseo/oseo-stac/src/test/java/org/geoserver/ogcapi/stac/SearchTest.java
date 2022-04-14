@@ -10,22 +10,29 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.hasItem;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import com.jayway.jsonpath.DocumentContext;
 import com.jayway.jsonpath.PathNotFoundException;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import net.minidev.json.JSONArray;
 import org.geoserver.data.test.SystemTestData;
 import org.geoserver.ogcapi.OGCAPIMediaTypes;
+import org.geotools.filter.IsGreaterThanImpl;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
 import org.jsoup.nodes.Document;
 import org.jsoup.select.Elements;
 import org.junit.Ignore;
 import org.junit.Test;
+import org.opengis.filter.Filter;
+import org.opengis.filter.expression.Literal;
 
 public class SearchTest extends STACTestSupport {
 
@@ -39,6 +46,7 @@ public class SearchTest extends STACTestSupport {
         copyTemplate("/items-SAS1.json");
         copyTemplate("/box.json");
         copyTemplate("/parentLink.json");
+        copyTemplate("/items-SENTINEL2.json");
     }
 
     @Test
@@ -88,6 +96,17 @@ public class SearchTest extends STACTestSupport {
                                 + "&filter=constellation='landsat8'&filter-lang=cql2-text",
                         200);
         checkCollectionsSinglePage(doc, 1, containsInAnyOrder("LANDSAT8"));
+    }
+
+    @Test
+    public void testCollectionsCqlGetQueryableNotInList() throws Exception {
+        // constellation is queryable only for LANDSAT8 not SENTINEL2
+        DocumentContext doc =
+                getAsJSONPath(
+                        "ogc/stac/search?collections=SENTINEL2,LANDSAT8"
+                                + "&filter=constellation='landsat8'&filter-lang=cql2-text",
+                        200);
+        assertEquals(new Integer(1), doc.read("numberMatched", Integer.class));
     }
 
     @Test
@@ -433,7 +452,7 @@ public class SearchTest extends STACTestSupport {
         Elements s2Body =
                 doc.select(
                         "div.card-header:has(a:contains(S2A_OPER_MSI_L1C_TL_MTI__20170308T220244_A008933_T11SLT_N02.04)) ~ div.card-body");
-        assertTextContains(s2Body, "[data-tid='gbounds']", "-119,174, 33,333, -117,969, 34,338.");
+        assertTextContains(s2Body, "[data-tid='gbounds']", "-119.174, 33.333, -117.969, 34.338.");
         assertTextContains(s2Body, "[data-tid='ccover']", "7");
     }
 
@@ -602,5 +621,59 @@ public class SearchTest extends STACTestSupport {
         List<String> ids = doc.read("features[*].id");
         assertEquals(1, ids.size());
         assertThat(ids, contains("SAS1_20180226102021.01"));
+    }
+
+    @Test
+    public void testSearchPropertySelection() throws Exception {
+        DocumentContext doc =
+                getAsJSONPath(
+                        "ogc/stac/search?fields=properties,-properties.sat:absolute_orbit,-properties.instruments,collection&filter=datetime > DATE('2017-02-25') and datetime < DATE('2017-03-31')&sortby=id",
+                        200);
+
+        checkCollectionsItemsSinglePage(
+                doc,
+                3,
+                containsInAnyOrder("SENTINEL2", "SENTINEL2", "gsTestCollection"),
+                contains(
+                        "GS_TEST_PRODUCT.01",
+                        "S2A_OPER_MSI_L1C_TL_MTI__20170308T220244_A008933_T11SLT_N02.04",
+                        "S2A_OPER_MSI_L1C_TL_SGS__20170226T171842_A008785_T32TPN_N02.04"));
+
+        JSONArray array = doc.read("features[*].properties");
+        for (int i = 0; i < array.size(); i++) {
+            Map<String, Object> props = (Map<String, Object>) array.get(i);
+            assertFalse(props.containsKey("sat:absolute_orbit"));
+            assertFalse(props.containsKey("instruments"));
+            // more then just mandatory props
+            assertTrue(props.size() > 2);
+        }
+    }
+
+    @Test
+    public void testSearchPropertySelectionStaticJsonObj() throws Exception {
+        DocumentContext doc =
+                getAsJSONPath(
+                        "ogc/stac/search?collections=SENTINEL2&fields=properties,-properties.SENTINEL2.fullStaticObject.staticAttr1,-properties.SENTINEL2.fullStaticObject.staticAttr3.nestedStatic1&filter=datetime > DATE('2017-02-25') and datetime < DATE('2017-03-31')&sortby=id",
+                        200);
+
+        JSONArray array = doc.read("features[?(@.id != 'GS_TEST_PRODUCT.01')].properties");
+        for (int i = 0; i < array.size(); i++) {
+            Map<String, Object> props = (Map<String, Object>) array.get(i);
+            Map<String, Object> sentinelObject = (Map<String, Object>) props.get("SENTINEL2");
+            Map<String, Object> staticValues =
+                    (Map<String, Object>) sentinelObject.get("fullStaticObject");
+            assertFalse(staticValues.containsKey("staticAttr1"));
+            assertEquals("staticValue2", staticValues.get("staticAttr2"));
+            Map<String, Object> staticValues3 =
+                    (Map<String, Object>) staticValues.get("staticAttr3");
+            assertFalse(staticValues3.containsKey("nestedStatic1"));
+            assertEquals("nestedStaticVal2", staticValues3.get("nestedStatic2"));
+        }
+    }
+
+    public void testIndexOptimizerVisitorConvertsDouble() throws Exception {
+        List<String> collections = Arrays.asList("SAS1");
+        Filter filter = getStacService().parseFilter(collections, "s1:ipf_version>2", null);
+        assertEquals(2.0, ((Literal) ((IsGreaterThanImpl) filter).getExpression2()).getValue());
     }
 }

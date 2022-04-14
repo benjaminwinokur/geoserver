@@ -36,11 +36,14 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import javax.servlet.http.HttpServletRequest;
 import org.geoserver.catalog.Catalog;
 import org.geoserver.config.GeoServer;
 import org.geoserver.featurestemplating.builders.TemplateBuilder;
 import org.geoserver.featurestemplating.builders.impl.RootBuilder;
+import org.geoserver.featurestemplating.builders.visitors.PropertySelectionVisitor;
 import org.geoserver.ogcapi.APIBBoxParser;
+import org.geoserver.ogcapi.APIContentNegotiationManager;
 import org.geoserver.ogcapi.APIDispatcher;
 import org.geoserver.ogcapi.APIException;
 import org.geoserver.ogcapi.APIFilterParser;
@@ -80,10 +83,13 @@ import org.opengis.filter.Filter;
 import org.opengis.filter.FilterFactory2;
 import org.opengis.filter.PropertyIsEqualTo;
 import org.opengis.filter.expression.Literal;
+import org.opengis.filter.expression.PropertyName;
 import org.opengis.filter.sort.SortBy;
 import org.opengis.referencing.FactoryException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -91,6 +97,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.context.request.ServletWebRequest;
 
 /** Implementation of OGC Features API service */
 @APIService(
@@ -130,12 +137,15 @@ public class STACService {
 
     private static final String DISPLAY_NAME = "SpatioTemporal Asset Catalog";
 
+    private static final String FIELDS_PARAM = "fields";
+
     static final Logger LOGGER = Logging.getLogger(STACService.class);
 
     private final GeoServer geoServer;
     private final OpenSearchAccessProvider accessProvider;
     private final STACTemplates templates;
     private final SampleFeatures sampleFeatures;
+    private final CollectionsCache collectionsCache;
     private TimeParser timeParser = new TimeParser();
     private final APIFilterParser filterParser;
 
@@ -144,12 +154,14 @@ public class STACService {
             OpenSearchAccessProvider accessProvider,
             STACTemplates templates,
             APIFilterParser filterParser,
-            SampleFeatures sampleFeatures) {
+            SampleFeatures sampleFeatures,
+            CollectionsCache collectionsCache) {
         this.geoServer = geoServer;
         this.accessProvider = accessProvider;
         this.templates = templates;
         this.filterParser = filterParser;
         this.sampleFeatures = sampleFeatures;
+        this.collectionsCache = collectionsCache;
     }
 
     public OSEOInfo getService() {
@@ -236,11 +248,17 @@ public class STACService {
     }
 
     private Feature getCollection(String collectionId) throws IOException {
+        return getCollection(collectionId, Query.ALL_PROPERTIES);
+    }
+
+    private Feature getCollection(String collectionId, List<PropertyName> selectedFields)
+            throws IOException {
         Query q = new Query();
         q.setFilter(
                 FF.and(
                         getEnabledFilter(),
                         FF.equals(FF.property(EO_IDENTIFIER), FF.literal(collectionId))));
+        q.setProperties(selectedFields);
         FeatureCollection<FeatureType, Feature> collections =
                 accessProvider.getOpenSearchAccess().getCollectionSource().getFeatures(q);
         Feature collection = DataUtilities.first(collections);
@@ -272,7 +290,9 @@ public class STACService {
     @DefaultContentType(OGCAPIMediaTypes.GEOJSON_VALUE)
     public ItemResponse item(
             @PathVariable(name = "collectionId") String collectionId,
-            @PathVariable(name = "itemId") String itemId)
+            @PathVariable(name = "itemId") String itemId,
+            @RequestParam(name = FIELDS_PARAM, required = false) String[] fields,
+            HttpServletRequest request)
             throws Exception {
         // run just to check the collection exists, and throw an appropriate exception otherwise
         getCollection(collectionId);
@@ -282,10 +302,22 @@ public class STACService {
                 FF.and(
                         getEnabledFilter(),
                         FF.equals(FF.property("identifier"), FF.literal(itemId))));
-        q.setProperties(getProductProperties(accessProvider.getOpenSearchAccess()));
 
         FeatureSource<FeatureType, Feature> products =
                 accessProvider.getOpenSearchAccess().getProductSource();
+        boolean hasField = request.getParameterMap().containsKey(FIELDS_PARAM);
+        RootBuilder rootBuilder = null;
+        if (supportsFieldsSelection(request) && hasField) {
+            rootBuilder = templates.getItemTemplate(collectionId);
+            PropertySelectionVisitor propertySelectionVisitor =
+                    new PropertySelectionVisitor(
+                            new STACPropertySelection(fields), products.getSchema());
+            rootBuilder = (RootBuilder) rootBuilder.accept(propertySelectionVisitor, null);
+            q.setPropertyNames(new ArrayList<>(propertySelectionVisitor.getQueryProperties()));
+        } else {
+            q.setProperties(getProductProperties(accessProvider.getOpenSearchAccess()));
+        }
+
         FeatureCollection<FeatureType, Feature> items = products.getFeatures(q);
         Feature item = DataUtilities.first(items);
         if (item == null) {
@@ -294,7 +326,9 @@ public class STACService {
                     "Could not locate item " + itemId,
                     HttpStatus.NOT_FOUND);
         }
-        return new ItemResponse(collectionId, item);
+        ItemResponse response = new ItemResponse(collectionId, item);
+        response.setTemplate(rootBuilder);
+        return response;
     }
 
     @GetMapping(path = "collections/{collectionId}/items", name = "getItems")
@@ -308,8 +342,11 @@ public class STACService {
             @RequestParam(name = "datetime", required = false) String datetime,
             @RequestParam(name = "filter", required = false) String filter,
             @RequestParam(name = "filter-lang", required = false) String filterLanguage,
-            @RequestParam(name = "sortby", required = false) SortBy[] sortBy)
+            @RequestParam(name = "sortby", required = false) SortBy[] sortBy,
+            @RequestParam(name = FIELDS_PARAM, required = false) String[] fields,
+            HttpServletRequest request)
             throws Exception {
+
         // check the collection is enabled
         Feature collection = getCollection(collectionId);
         if (Boolean.FALSE.equals(collection.getProperty("enabled").getValue())) {
@@ -318,19 +355,26 @@ public class STACService {
                     "Collection " + collectionId + " is not avialable",
                     HttpStatus.NOT_FOUND);
         }
+        boolean hasFieldParam = request.getParameterMap().containsKey(FIELDS_PARAM);
+        QueryResultBuilder resultBuilder =
+                new QueryResultBuilder(
+                        templates, accessProvider, filterParser, sampleFeatures, collectionsCache);
+        resultBuilder
+                .collectionIds(Arrays.asList(collectionId))
+                .startIndex(startIndex)
+                .requestedLimit(requestedLimit)
+                .bbox(bbox)
+                .datetime(datetime)
+                .filter(filter)
+                .filterLanguage(filterLanguage)
+                .sortby(sortBy)
+                .excludeDisabledCollection(false)
+                .hasFieldParam(hasFieldParam)
+                .fields(fields)
+                .supportsFieldsSelection(supportsFieldsSelection(request));
+
         // query the items based on the request parameters
-        QueryResult qr =
-                queryItems(
-                        Arrays.asList(collectionId),
-                        startIndex,
-                        requestedLimit,
-                        bbox,
-                        null,
-                        datetime,
-                        filter,
-                        filterLanguage,
-                        sortBy,
-                        false);
+        QueryResult qr = resultBuilder.build();
 
         // build the links
         ItemsResponse response =
@@ -347,7 +391,7 @@ public class STACService {
         response.setPrevious(linksBuilder.getPrevious());
         response.setNext(linksBuilder.getNext());
         response.setSelf(linksBuilder.getSelf());
-
+        response.setTemplateMap(qr.getTemplateMap());
         return response;
     }
 
@@ -363,25 +407,36 @@ public class STACService {
             @RequestParam(name = "datetime", required = false) String datetime,
             @RequestParam(name = "filter", required = false) String filter,
             @RequestParam(name = "filter-lang", required = false) String filterLanguage,
-            @RequestParam(name = "sortby", required = false) SortBy[] sortBy)
+            @RequestParam(name = "sortby", required = false) SortBy[] sortBy,
+            @RequestParam(name = FIELDS_PARAM, required = false) String[] fields,
+            HttpServletRequest request)
             throws Exception {
+        boolean hasFieldParam = request.getParameterMap().containsKey(FIELDS_PARAM);
+        QueryResultBuilder resultBuilder =
+                new QueryResultBuilder(
+                        templates, accessProvider, filterParser, sampleFeatures, collectionsCache);
+        resultBuilder
+                .collectionIds(collectionIds)
+                .startIndex(startIndex)
+                .requestedLimit(requestedLimit)
+                .bbox(bbox)
+                .intersects(intersects)
+                .datetime(datetime)
+                .filter(filter)
+                .filterLanguage(filterLanguage)
+                .sortby(sortBy)
+                .excludeDisabledCollection(true)
+                .hasFieldParam(hasFieldParam)
+                .fields(fields)
+                .supportsFieldsSelection(supportsFieldsSelection(request));
+
         // query the items based on the request parameters
-        QueryResult qr =
-                queryItems(
-                        collectionIds,
-                        startIndex,
-                        requestedLimit,
-                        bbox,
-                        intersects,
-                        datetime,
-                        filter,
-                        filterLanguage,
-                        sortBy,
-                        true);
+        QueryResult qr = resultBuilder.build();
 
         // build the links
         SearchResponse response =
                 new SearchResponse(qr.getItems(), qr.getNumberMatched(), qr.getReturned());
+        response.setTemplateMap(qr.getTemplateMap());
         String path = "ogc/stac/search";
         PaginationLinksBuilder linksBuilder =
                 new PaginationLinksBuilder(
@@ -393,7 +448,7 @@ public class STACService {
         response.setPrevious(linksBuilder.getPrevious());
         response.setNext(linksBuilder.getNext());
         response.setSelf(linksBuilder.getSelf());
-
+        response.setTemplateMap(qr.getTemplateMap());
         return response;
     }
 
@@ -401,40 +456,23 @@ public class STACService {
     @ResponseBody
     @DefaultContentType(OGCAPIMediaTypes.GEOJSON_VALUE)
     public SearchResponse searchPost(@RequestBody SearchQuery sq) throws Exception {
-        FeatureSource<FeatureType, Feature> source =
-                accessProvider.getOpenSearchAccess().getProductSource();
 
-        // request parsing
-        FilterMerger filters = new FilterMerger();
-
-        List<String> collectionIds = sq.getCollections();
-        addCollectionsFilter(filters, collectionIds, true);
-
-        double[] bbox = sq.getBbox();
-        if (bbox != null) {
-            filters.add(APIBBoxParser.toFilter(bbox, DefaultGeographicCRS.WGS84));
-        }
-        if (sq.getIntersection() != null) {
-            filters.add(FF.intersects(FF.property(""), FF.literal(sq.getIntersection())));
-        }
-        if (sq.getDatetime() != null) {
-            filters.add(buildTimeFilter(sq.getDatetime()));
-        }
-        if (sq.getFilter() != null) {
-            Filter mapped = parseFilter(sq.getCollections(), sq.getFilter(), sq.getFilterLang());
-            filters.add(mapped);
-        }
-        // keep only enabled products
-        filters.add(getEnabledFilter());
-
-        Query q = new Query();
-        q.setStartIndex(sq.getStartIndex());
-        int limit = getLimit(sq.getLimit());
-        q.setMaxFeatures(limit);
-        q.setFilter(filters.and());
+        QueryResultBuilder resultBuilder =
+                new QueryResultBuilder(
+                        templates, accessProvider, filterParser, sampleFeatures, collectionsCache);
+        resultBuilder
+                .collectionIds(sq.getCollections())
+                .intersects(sq.getIntersection())
+                .startIndex(sq.getStartIndex())
+                .requestedLimit(sq.getLimit())
+                .bbox(sq.getBbox())
+                .datetime(sq.getDatetime())
+                .filter(sq.getFilter())
+                .filterLanguage(sq.getFilterLang())
+                .excludeDisabledCollection(true);
 
         // query the items based on the request parameters
-        QueryResult qr = queryItems(source, q);
+        QueryResult qr = resultBuilder.build();
 
         // build the links
         SearchResponse response =
@@ -465,10 +503,10 @@ public class STACService {
 
         if (collectionIds != null && !collectionIds.isEmpty()) {
             collectionIds.removeAll(disabledIds);
-            filters.add(getCollectionsFilter(collectionIds));
+            filters.add(getProductInCollectionFilter(collectionIds));
         } else if (!disabledIds.isEmpty()) {
             // exclude disabled collections
-            filters.add(FF.not(getCollectionsFilter(disabledIds)));
+            filters.add(FF.not(getProductInCollectionFilter(disabledIds)));
         }
     }
 
@@ -476,11 +514,26 @@ public class STACService {
         return FF.equals(FF.property(OpenSearchAccess.ENABLED), FF.literal(true));
     }
 
+    static Filter getCollectionsFilter(List<String> collectionIds) {
+        FilterMerger filters = new FilterMerger();
+        collectionIds.stream()
+                .map(id -> FF.equals(FF.property("parentIdentifier"), FF.literal(id)))
+                .forEach(f -> filters.add(f));
+        return filters.or();
+    }
+
     public Filter parseFilter(List<String> collectionIds, String filter, String filterLang)
             throws IOException {
         Filter parsed = filterParser.parse(filter, filterLang);
-        return new TemplatePropertyMapper(templates, sampleFeatures)
-                .mapProperties(collectionIds, parsed);
+        Filter templateMapped =
+                new TemplatePropertyMapper(
+                                templates,
+                                sampleFeatures,
+                                collectionsCache,
+                                geoServer.getService(OSEOInfo.class))
+                        .mapProperties(collectionIds, parsed);
+        STACIndexOptimizerVisitor stacIndexOptimizerVisitor = new STACIndexOptimizerVisitor();
+        return (Filter) templateMapped.accept(stacIndexOptimizerVisitor, null);
     }
 
     /** TODO: Factor out this method into a Query mapper object */
@@ -587,12 +640,16 @@ public class STACService {
         return new QueryResult(q, items, BigInteger.valueOf(matched), returned);
     }
 
-    static Filter getCollectionsFilter(List<String> collectionIds) {
+    static Filter getProductInCollectionFilter(List<String> collectionIds) {
         FilterMerger filters = new FilterMerger();
         collectionIds.stream()
                 .map(id -> FF.equals(FF.property("parentIdentifier"), FF.literal(id)))
                 .forEach(f -> filters.add(f));
         return filters.or();
+    }
+
+    static Filter getCollectionFilter(String collectionId) {
+        return FF.equals(FF.property(EO_IDENTIFIER), FF.literal(collectionId));
     }
 
     /**
@@ -657,7 +714,9 @@ public class STACService {
                                 id,
                                 templates.getItemTemplate(collectionId),
                                 sampleFeatures.getSchema(),
-                                sampleFeatures.getSample(collectionId))
+                                sampleFeatures.getSample(collectionId),
+                                collectionsCache.getCollection(collectionId),
+                                geoServer.getService(OSEOInfo.class))
                         .getQueryables();
         queryables.setCollectionId(collectionId);
         return queryables;
@@ -703,7 +762,9 @@ public class STACService {
                                 id,
                                 templates.getItemTemplate(null),
                                 sampleFeatures.getSchema(),
-                                sampleFeatures.getSample(null))
+                                sampleFeatures.getSample(null),
+                                collectionsCache.getCollection(null),
+                                geoServer.getService(OSEOInfo.class))
                         .getQueryables();
         return queryables;
     }
@@ -724,5 +785,30 @@ public class STACService {
         RootBuilder template = this.templates.getItemTemplate(null);
         Sortables sortables = new STACSortablesMapper(template, itemsSchema, id).getSortables();
         return sortables;
+    }
+
+    private boolean supportsFieldsSelection(HttpServletRequest request)
+            throws HttpMediaTypeNotAcceptableException {
+        // if neither accept, neither f are present geo+json is the default.
+
+        String strMediaType = request.getParameter("f");
+
+        if (strMediaType == null) strMediaType = request.getHeader(HttpHeaders.ACCEPT);
+
+        // default mediatype is application/geo+json according to
+        // @DefaultContentType(OGCAPIMediaTypes.GEOJSON_VALUE)
+        if (strMediaType == null) return true;
+
+        // use the APIContentNegotiationManager then
+        APIContentNegotiationManager contentNegotiationManager = new APIContentNegotiationManager();
+        List<MediaType> mediaTypes =
+                contentNegotiationManager.resolveMediaTypes(new ServletWebRequest(request));
+        if (mediaTypes == null || mediaTypes.isEmpty()) {
+            return false;
+        } else {
+            MediaType mediaType = mediaTypes.get(0);
+            MediaType geoJSON = MediaType.parseMediaType(OGCAPIMediaTypes.GEOJSON_VALUE);
+            return mediaType.equals(MediaType.APPLICATION_JSON) || mediaType.equals(geoJSON);
+        }
     }
 }

@@ -10,15 +10,22 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import com.jayway.jsonpath.DocumentContext;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import net.minidev.json.JSONArray;
+import org.geoserver.config.GeoServer;
 import org.geoserver.data.test.SystemTestData;
 import org.geoserver.ogcapi.OGCAPIMediaTypes;
+import org.geoserver.opensearch.eo.OSEOInfo;
 import org.hamcrest.Matchers;
 import org.jsoup.nodes.Document;
 import org.jsoup.select.Elements;
@@ -145,7 +152,7 @@ public class ItemsTest extends STACTestSupport {
     }
 
     private void testSentinel2SampleHTML(Elements elements) {
-        assertTextContains(elements, "[data-tid='gbounds']", "-119,174, 33,333, -117,969, 34,338.");
+        assertTextContains(elements, "[data-tid='gbounds']", "-119.174, 33.333, -117.969, 34.338.");
         assertTextContains(elements, "[data-tid='ccover']", "7");
     }
 
@@ -490,5 +497,146 @@ public class ItemsTest extends STACTestSupport {
                         200);
 
         assertThat((List<String>) doc.read("features[*].id"), contains("SAS1_20180226102021.01"));
+    }
+
+    @Test
+    public void testPropertySelectionOnDynamicMerge() throws Exception {
+        DocumentContext result =
+                getAsJSONPath(
+                        "ogc/stac/collections/LANDSAT8/items?fields=properties.instruments,-assets,assets.thumbnail.type",
+                        200);
+
+        // empty fields param only mandatory attributes should be there.
+        String id = result.read("features[0].id");
+        String type = result.read("features[0].type");
+        Map<String, Object> geom = result.read("features[0].geometry");
+        JSONArray bbox = result.read("features[0].bbox");
+        Map<String, Object> properties = result.read("features[0].properties");
+        Map<String, Object> assets = result.read("features[0].assets");
+        String thumbnailType = result.read("features[0].assets.thumbnail.type");
+        JSONArray links = result.read("features[0].links");
+
+        assertEquals("LS8_TEST.02", id);
+        assertEquals("Feature", type);
+        assertEquals(2, geom.size());
+        assertEquals(4, bbox.size());
+        assertTrue(properties.size() > 2);
+        JSONArray array = (JSONArray) properties.get("instruments");
+        assertTrue(array.contains("OLI"));
+        assertTrue(array.contains("TIRS"));
+        assertNotNull(assets);
+        // size is one other assets object have been filtered out.
+        assertEquals(1, assets.size());
+        assertEquals("will replace", thumbnailType);
+        assertNotNull(links);
+        assertFalse(links.isEmpty());
+    }
+
+    @Test
+    public void testPropertySelectionDynamicMerge2() throws Exception {
+        DocumentContext result =
+                getAsJSONPath(
+                        "ogc/stac/collections/LANDSAT8/items?fields=properties,-properties.created,-properties.datetime,-assets.thumbnail",
+                        200);
+
+        // empty fields param only mandatory attributes should be there.
+        String id = result.read("features[0].id");
+        String type = result.read("features[0].type");
+        Map<String, Object> geom = result.read("features[0].geometry");
+        JSONArray bbox = result.read("features[0].bbox");
+        Map<String, Object> properties = result.read("features[0].properties");
+        Map<String, Object> assets = result.read("features[0].assets");
+        JSONArray links = result.read("features[0].links");
+
+        assertEquals("LS8_TEST.02", id);
+        assertEquals("Feature", type);
+        assertEquals(2, geom.size());
+        assertEquals(4, bbox.size());
+        // more then just the two mandatory ones.
+        assertTrue(properties.size() > 2);
+        assertFalse(properties.containsKey("created"));
+        assertFalse(properties.containsKey("datetime"));
+
+        // asserts some of the properties value included.
+        assertEquals(properties.get("platform"), "LANDSAT_8");
+        assertEquals(properties.get("constellation"), "landsat8");
+        assertEquals(properties.get("eo:cloud_cover"), 0d);
+        assertEquals(properties.get("sat:orbit_state"), "descending");
+        assertEquals(properties.get("gsd"), 30);
+        assertEquals(properties.get("landsat:orbit"), 65);
+
+        assertNotNull(assets);
+        assertFalse(assets.isEmpty());
+        assertFalse(assets.containsKey("thumbnail"));
+        assertNotNull(links);
+        assertFalse(links.isEmpty());
+    }
+
+    @Test
+    public void testPropertySelectionDynamicIncludeFlat() throws Exception {
+
+        // with a base node with an attributeName equal to one of the attributes in the
+        // item json property. The item json property should override the base one.
+        DocumentContext json =
+                getAsJSONPath(
+                        "ogc/stac/collections/SAS1/items/SAS1_20180226102021.01?fields=properties,dynamicIncludeFlatTest,-dynamicIncludeFlatTest.thumbnail2",
+                        200);
+
+        String id = json.read("id");
+        String type = json.read("type");
+        Map<String, Object> geom = json.read("geometry");
+        JSONArray bbox = json.read("bbox");
+        Map<String, Object> properties = json.read("properties");
+        Map<String, Object> assets = json.read("assets");
+        JSONArray links = json.read("links");
+        Map<String, Object> includeFlatField = json.read("dynamicIncludeFlatTest");
+
+        assertEquals("SAS1_20180226102021.01", id);
+        assertEquals("Feature", type);
+        assertEquals(2, geom.size());
+        assertEquals(4, bbox.size());
+        // more then just the two mandatory ones.
+        assertTrue(properties.size() > 2);
+        // asserts some of the properties value included.
+        assertTrue(properties.containsKey("created"));
+        assertTrue(properties.containsKey("datetime"));
+        assertEquals(properties.get("s1:frame_number"), 218);
+        assertEquals(properties.get("s1:start_anxtime"), 1090739);
+        assertEquals(properties.get("s1:stop_anxtime"), 1117820);
+        assertEquals(properties.get("s1:processing_date"), "2019-07-07T18: 33: 12.592265Z");
+        assertEquals(properties.get("s1:processing_site"), "Airbus DS-Newport");
+        assertEquals(properties.get("s1:ipf_version"), 3.1);
+
+        assertNotNull(assets);
+        assertFalse(assets.isEmpty());
+        assertNotNull(links);
+        assertFalse(links.isEmpty());
+
+        // we excluded thumbnail2 keeping only thumbnail
+        assertFalse(includeFlatField.containsKey("thumbnail2"));
+        assertTrue(includeFlatField.containsKey("thumbnail"));
+    }
+
+    public void testQueryByDynamicPropertyNonQueryable() throws Exception {
+        // s2:granule_id is in a dynamically included JSON but is not in the queryables array
+        DocumentContext doc =
+                getAsJSONPath(
+                        "ogc/stac/collections/SAS1/items?filter=s2:granule_id = 'S2A_OPER_MSI_L2A_TL_VGS1_20201206T095713_A028503_T37MDU_N02.143'",
+                        200);
+        assertEquals(new Integer(0), doc.read("numberMatched", Integer.class));
+
+        GeoServer gs = getGeoServer();
+        OSEOInfo service = gs.getService(OSEOInfo.class);
+        String queryables = "id,geometry,collection,s2:granule_id";
+        service.setGlobalQueryables(queryables);
+        gs.save(service);
+        DocumentContext doc2 =
+                getAsJSONPath(
+                        "ogc/stac/collections/SAS1/items?filter=s2:granule_id = 'S2A_OPER_MSI_L2A_TL_VGS1_20201206T095713_A028503_T37MDU_N02.143'",
+                        200);
+        assertThat((List<String>) doc2.read("features[*].id"), contains("SAS1_20180227102021.02"));
+
+        service.setGlobalQueryables("id,geometry,collection");
+        gs.save(service);
     }
 }
